@@ -15,8 +15,12 @@ from app.core.profiler import DataProfiler
 
 
 class ProfileWorker(QThread):
-    finished = pyqtSignal(dict)
+    finished = pyqtSignal(dict, int)
     error    = pyqtSignal(str)
+
+    def __init__(self, dataset_version: int):
+        super().__init__()
+        self.dataset_version = dataset_version
 
     def run(self):
         try:
@@ -25,7 +29,7 @@ class ProfileWorker(QThread):
                 self.error.emit("No dataset loaded. Please import data first.")
                 return
             profile = DataProfiler.profile(df)
-            self.finished.emit(profile)
+            self.finished.emit(profile, self.dataset_version)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -129,16 +133,17 @@ class ExplorePage(QWidget):
     def __init__(self):
         super().__init__()
         self._worker = None
+        self._profiled_version = None
         self._build_ui()
 
     def showEvent(self, event):
         """Auto-profile when the page becomes visible and data is available."""
         super().showEvent(event)
-        if AppState.get_dataframe() is not None and not self._has_profile():
+        if (
+            AppState.get_dataframe() is not None
+            and self._profiled_version != AppState.get_version()
+        ):
             self._run_profile()
-
-    def _has_profile(self) -> bool:
-        return self._scroll_content.layout().count() > 0
 
     # ------------------------------------------------------------------ #
     #  UI                                                                  #
@@ -213,9 +218,17 @@ class ExplorePage(QWidget):
     # ------------------------------------------------------------------ #
 
     def _run_profile(self):
+        if self._worker is not None and self._worker.isRunning():
+            return
+
+        if AppState.get_dataframe() is None:
+            self._on_error("No dataset loaded. Please import data first.")
+            return
+
         self._status.setText("Profiling dataset…")
+        self._summary_frame.setVisible(False)
         self._clear_cards()
-        self._worker = ProfileWorker()
+        self._worker = ProfileWorker(AppState.get_version())
         self._worker.finished.connect(self._on_profile_done)
         self._worker.error.connect(self._on_error)
         self._worker.start()
@@ -226,8 +239,14 @@ class ExplorePage(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-    def _on_profile_done(self, profile: dict):
+    def _on_profile_done(self, profile: dict, dataset_version: int):
+        if dataset_version != AppState.get_version():
+            self._worker = None
+            self._run_profile()
+            return
+
         self._status.setText("")
+        self._profiled_version = dataset_version
         self._update_summary(profile)
 
         columns = profile.get("columns", {})
@@ -235,6 +254,8 @@ class ExplorePage(QWidget):
             card = ColumnCard(col_name, stats)
             row, col = divmod(i, 3)
             self._cards_grid.addWidget(card, row, col)
+
+        self._worker = None
 
     def _update_summary(self, profile: dict):
         meta = profile.get("meta", {})
@@ -247,3 +268,4 @@ class ExplorePage(QWidget):
 
     def _on_error(self, msg: str):
         self._status.setText(f"❌  {msg}")
+        self._worker = None

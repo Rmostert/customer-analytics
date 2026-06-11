@@ -1,0 +1,11 @@
+customer_id,first_name,last_name,email,country,age,gender,total_spent,num_orders,last_order_date,loyalty_tier,churn_risk
+1001,Alice,Meyer,alice.meyer@email.com,Germany,34,F,1240.50,12,2024-11-15,Gold,Low
+1002,Bob,Schmidt,bob.schmidt@email.com,Germany,45,M,320.00,3,2024-09-01,Bronze,High
+1003,Clara,Müller,clara.mueller@email.com,Austria,28,F,890.75,8,2024-12-01,Silver,Low
+1004,David,Koch,david.koch@email.com,Switzerland,52,M,4500.00,35,2024-12-10,Platinum,Low
+1005,Eva,Wagner,eva.wagner@email.com,Germany,31,F,150.25,2,2024-07-20,Bronze,High
+1006,Frank,Becker,frank.becker@email.com,Germany,41,M,2100.00,18,2024-11-28,Gold,Medium
+1007,Greta,Hoffman,greta.hoffman@email.com,Austria,26,F,560.00,6,2024-10-15,Silver,Medium
+1008,Hans,Schäfer,hans.schaefer@email.com,Germany,60,M,3200.00,28,2024-12-05,Platinum,Low
+1009,Irene,Wolf,irene.wolf@email.com,Switzerland,37,F,780.00,9,2024-11-01,Silver,Low
+1010,Jan,Richter,jan.richter@email.com,Germany,29,M,95.00,1,2024-06-10,Bronze,High
