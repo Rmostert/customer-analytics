@@ -8,7 +8,7 @@ Two code paths:
 """
 
 import pandas as pd
-import numpy as np
+from numbers import Number
 from app.utils.app_state import AppState
 
 
@@ -39,6 +39,9 @@ class DataProfiler:
         for col in df.columns:
             series     = df[col]
             dtype      = str(series.dtype)
+            if DataProfiler._is_complex_pandas_series(series):
+                continue
+
             is_numeric = pd.api.types.is_numeric_dtype(series)
 
             count       = int(series.count())
@@ -70,14 +73,15 @@ class DataProfiler:
 
             columns[col] = stats
 
-        total_missing = int(df.isnull().sum().sum())
-        numeric_cols  = int(df.select_dtypes(include="number").shape[1])
+        profiled_df = df[list(columns.keys())]
+        total_missing = int(profiled_df.isnull().sum().sum())
+        numeric_cols  = int(profiled_df.select_dtypes(include="number").shape[1])
 
         meta = {
             "rows":          len(df),
-            "cols":          len(df.columns),
+            "cols":          len(columns),
             "numeric_cols":  numeric_cols,
-            "cat_cols":      len(df.columns) - numeric_cols,
+            "cat_cols":      len(columns) - numeric_cols,
             "total_missing": total_missing,
             "engine":        "pandas",
         }
@@ -85,80 +89,59 @@ class DataProfiler:
         return {"meta": meta, "columns": columns}
 
     # ------------------------------------------------------------------ #
-    #  DuckDB path  — everything is SQL, nothing loads into RAM           #
+    #  DuckDB path  — summarize in SQL without loading raw data           #
     # ------------------------------------------------------------------ #
 
     @staticmethod
     def _profile_duckdb(con) -> dict:
         """
-        Profile a large Parquet file entirely through DuckDB SQL.
-        Each column gets its own aggregation query so we can handle
-        mixed types gracefully.
+        Profile a large Parquet file through DuckDB's native SUMMARIZE.
+        SUMMARIZE returns one metadata row per source column, so the raw
+        dataset never comes back into Python.
         """
-        col_names = AppState.get_column_names()
-        col_types = AppState.get_column_types()
         row_count = AppState.get_row_count()
+        summary_df = con.execute("SUMMARIZE SELECT * FROM dataset").df()
 
         columns      = {}
         total_missing = 0
-
-        NUMERIC_DUCK_TYPES = {
-            "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "HUGEINT",
-            "FLOAT", "DOUBLE", "DECIMAL", "REAL", "UBIGINT",
-        }
-
         numeric_col_count = 0
 
-        for col in col_names:
-            raw_type   = col_types.get(col, "VARCHAR").upper()
-            is_numeric = any(t in raw_type for t in NUMERIC_DUCK_TYPES)
+        for _, row in summary_df.iterrows():
+            col = row["column_name"]
+            raw_type = str(row["column_type"]).upper()
+            if DataProfiler._is_complex_duck_type(raw_type):
+                continue
+
+            is_numeric = DataProfiler._is_numeric_duck_type(raw_type)
 
             if is_numeric:
                 numeric_col_count += 1
 
-            safe_col = f'"{col}"'
-
-            # Core stats — always safe
-            base_sql = f"""
-                SELECT
-                    COUNT({safe_col})                                    AS cnt,
-                    COUNT(DISTINCT {safe_col})                           AS uniq,
-                    COUNT(*) - COUNT({safe_col})                         AS missing
-                FROM dataset
-            """
-            base = con.execute(base_sql).fetchone()
-            cnt, uniq, missing = int(base[0]), int(base[1]), int(base[2])
-            missing_pct = round(missing / row_count * 100, 1) if row_count > 0 else 0
+            missing_pct = DataProfiler._fmt_pct(row["null_percentage"])
+            missing = DataProfiler._missing_from_pct(row_count, missing_pct)
+            non_null_count = max(row_count - missing, 0)
+            unique = DataProfiler._to_int(row["approx_unique"])
             total_missing += missing
 
             stats = {
                 "dtype":          raw_type,
                 "dtype_category": "numeric" if is_numeric else "categorical",
-                "count":          cnt,
-                "unique":         uniq,
+                "count":          non_null_count,
+                "unique":         unique,
                 "missing":        missing,
                 "missing_pct":    missing_pct,
             }
 
             if is_numeric:
-                num_sql = f"""
-                    SELECT
-                        AVG({safe_col})                         AS mean,
-                        STDDEV({safe_col})                      AS std,
-                        MIN({safe_col})                         AS mn,
-                        MAX({safe_col})                         AS mx,
-                        MEDIAN({safe_col})                      AS med
-                    FROM dataset
-                """
-                row = con.execute(num_sql).fetchone()
                 stats.update({
-                    "mean":   DataProfiler._fmt(row[0]),
-                    "std":    DataProfiler._fmt(row[1]),
-                    "min":    DataProfiler._fmt(row[2]),
-                    "max":    DataProfiler._fmt(row[3]),
-                    "median": DataProfiler._fmt(row[4]),
+                    "mean":   DataProfiler._fmt(row["avg"]),
+                    "std":    DataProfiler._fmt(row["std"]),
+                    "min":    DataProfiler._fmt(row["min"]),
+                    "max":    DataProfiler._fmt(row["max"]),
+                    "median": DataProfiler._fmt(row["q50"]),
                 })
             else:
+                safe_col = DataProfiler._quote_identifier(col)
                 top_sql = f"""
                     SELECT {safe_col}, COUNT(*) AS freq
                     FROM dataset
@@ -175,11 +158,11 @@ class DataProfiler:
 
         meta = {
             "rows":          row_count,
-            "cols":          len(col_names),
+            "cols":          len(columns),
             "numeric_cols":  numeric_col_count,
-            "cat_cols":      len(col_names) - numeric_col_count,
+            "cat_cols":      len(columns) - numeric_col_count,
             "total_missing": total_missing,
-            "engine":        "duckdb",          # shown in the UI summary bar
+            "engine":        "duckdb summarize",
         }
 
         return {"meta": meta, "columns": columns}
@@ -192,8 +175,68 @@ class DataProfiler:
     def _fmt(val) -> str:
         if val is None:
             return "—"
-        if isinstance(val, float) and np.isnan(val):
+        if isinstance(val, str):
+            val = val.strip()
+            if not val:
+                return "—"
+            try:
+                val = float(val)
+            except ValueError:
+                return val
+        if isinstance(val, Number) and pd.isna(val):
             return "—"
-        if isinstance(val, float):
+        if isinstance(val, Number) and not isinstance(val, bool):
+            if float(val).is_integer():
+                return f"{int(val):,}"
             return f"{val:,.2f}"
         return str(val)
+
+    @staticmethod
+    def _fmt_pct(val) -> float:
+        if val is None:
+            return 0.0
+        if isinstance(val, str):
+            val = val.replace("%", "").strip()
+        if pd.isna(val):
+            return 0.0
+        return round(float(val), 1)
+
+    @staticmethod
+    def _missing_from_pct(row_count: int, missing_pct: float) -> int:
+        if row_count <= 0:
+            return 0
+        return int(round(row_count * missing_pct / 100))
+
+    @staticmethod
+    def _to_int(val) -> int:
+        if val is None or pd.isna(val):
+            return 0
+        return int(round(float(val)))
+
+    @staticmethod
+    def _is_numeric_duck_type(raw_type: str) -> bool:
+        numeric_duck_types = {
+            "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "HUGEINT",
+            "UINTEGER", "UBIGINT", "USMALLINT", "UTINYINT",
+            "FLOAT", "DOUBLE", "DECIMAL", "REAL",
+        }
+        return any(t in raw_type for t in numeric_duck_types)
+
+    @staticmethod
+    def _is_complex_duck_type(raw_type: str) -> bool:
+        raw_type = raw_type.upper()
+        complex_prefixes = ("STRUCT", "MAP", "UNION", "LIST")
+        return raw_type.startswith(complex_prefixes) or "[]" in raw_type
+
+    @staticmethod
+    def _is_complex_pandas_series(series: pd.Series) -> bool:
+        non_null = series.dropna()
+        if non_null.empty:
+            return False
+        return non_null.map(
+            lambda val: isinstance(val, (dict, list, tuple, set))
+        ).any()
+
+    @staticmethod
+    def _quote_identifier(identifier: str) -> str:
+        return '"' + identifier.replace('"', '""') + '"'
