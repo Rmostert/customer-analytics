@@ -9,3 +9,4 @@ pyarrow>=15.0.0        # Parquet read/write
 duckdb>=0.10.0         # Out-of-memory profiling for large Parquet files
 scikit-learn>=1.4.0    # Segmentation & NBA models (future sprints)
 pyinstaller>=6.0.0     # Packaging to .exe / .app
+kmodes>=0.12.2
