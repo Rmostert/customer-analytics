@@ -13,13 +13,14 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QComboBox, QSpinBox, QListWidget, QAbstractItemView,
     QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView,
-    QFileDialog, QMessageBox, QProgressBar, QSplitter,
+    QFileDialog, QMessageBox, QProgressBar, QSplitter, QCheckBox,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QPainter, QColor, QFont
 
 from app.utils.app_state import AppState
 from app.core.segmentation import SegmentationEngine, SegmentationResult
+from app.core.duckdb_sample import DEFAULT_SAMPLE_SIZE, MAX_SAMPLE_SIZE
 
 import pandas as pd
 
@@ -49,30 +50,80 @@ class SegWorker(QThread):
         try:
             cfg = self.config
             self.progress.emit(15)
+            progress = self.progress.emit
+            large = cfg.get("duckdb_filepath")
 
             if cfg["method"] == "kmeans":
-                result = SegmentationEngine.run_kmeans(
-                    df=              cfg["df"],
-                    customer_id_col= cfg["id_col"],
-                    feature_cols=    cfg["feature_cols"],
-                    n_clusters=      cfg["n_clusters"],
-                )
+                if large:
+                    result = SegmentationEngine.run_kmeans_large(
+                        filepath=        cfg["duckdb_filepath"],
+                        customer_id_col= cfg["id_col"],
+                        feature_cols=    cfg["feature_cols"],
+                        n_clusters=      cfg["n_clusters"],
+                        total_rows=      cfg["total_rows"],
+                        sample_size=     cfg["sample_size"],
+                        score_full=      cfg.get("score_full", True),
+                        progress=        progress,
+                        encoding=        cfg.get("encoding", "utf-8"),
+                    )
+                else:
+                    result = SegmentationEngine.run_kmeans(
+                        df=              cfg["df"],
+                        customer_id_col= cfg["id_col"],
+                        feature_cols=    cfg["feature_cols"],
+                        n_clusters=      cfg["n_clusters"],
+                    )
             elif cfg["method"] == "GaussianMixture":
-                result = SegmentationEngine.run_gmm(
-                    df=              cfg["df"],
-                    customer_id_col= cfg["id_col"],
-                    feature_cols=    cfg["feature_cols"],
-                    n_clusters=      cfg["n_clusters"],
-                )
-
+                if large:
+                    result = SegmentationEngine.run_gmm_large(
+                        filepath=        cfg["duckdb_filepath"],
+                        customer_id_col= cfg["id_col"],
+                        feature_cols=    cfg["feature_cols"],
+                        n_clusters=      cfg["n_clusters"],
+                        total_rows=      cfg["total_rows"],
+                        sample_size=     cfg["sample_size"],
+                        score_full=      cfg.get("score_full", True),
+                        progress=        progress,
+                        encoding=        cfg.get("encoding", "utf-8"),
+                    )
+                else:
+                    result = SegmentationEngine.run_gmm(
+                        df=              cfg["df"],
+                        customer_id_col= cfg["id_col"],
+                        feature_cols=    cfg["feature_cols"],
+                        n_clusters=      cfg["n_clusters"],
+                    )
             elif cfg["method"] == "KPrototypes":
-                result = SegmentationEngine.run_kprototypes(
-                    df=              cfg["df"],
+                if large:
+                    result = SegmentationEngine.run_kprototypes_large(
+                        filepath=        cfg["duckdb_filepath"],
+                        customer_id_col= cfg["id_col"],
+                        feature_cols=    cfg["feature_cols"],
+                        n_clusters=      cfg["n_clusters"],
+                        total_rows=      cfg["total_rows"],
+                        sample_size=     cfg["sample_size"],
+                        score_full=      cfg.get("score_full", True),
+                        progress=        progress,
+                        encoding=        cfg.get("encoding", "utf-8"),
+                    )
+                else:
+                    result = SegmentationEngine.run_kprototypes(
+                        df=              cfg["df"],
+                        customer_id_col= cfg["id_col"],
+                        feature_cols=    cfg["feature_cols"],
+                        n_clusters=      cfg["n_clusters"],
+                    )
+            elif large:
+                result = SegmentationEngine.run_rfm_large(
+                    filepath=        cfg["duckdb_filepath"],
                     customer_id_col= cfg["id_col"],
-                    feature_cols=    cfg["feature_cols"],
-                    n_clusters=      cfg["n_clusters"],
+                    recency_col=     cfg["recency_col"],
+                    frequency_col=   cfg["frequency_col"],
+                    monetary_col=    cfg["monetary_col"],
+                    total_rows=      cfg["total_rows"],
+                    progress=        progress,
+                    encoding=        cfg.get("encoding", "utf-8"),
                 )
-
             else:
                 result = SegmentationEngine.run_rfm(
                     df=              cfg["df"],
@@ -213,14 +264,40 @@ class SegmentationPage(QWidget):
         layout.addWidget(subtitle)
 
         self._large_file_banner = QLabel(
-            "Large-file mode (DuckDB): only a 100-row preview is in memory. "
-            "Segmentation requires the full dataset — import a file under 500 MB "
-            "or export a smaller subset first."
+            "Large-file mode (DuckDB): clustering fits on a random sample, then "
+            "optionally assigns labels to the full file in batches. "
+            "RFM uses the full dataset for quartiles and tier assignment."
         )
         self._large_file_banner.setObjectName("status_label")
         self._large_file_banner.setWordWrap(True)
         self._large_file_banner.setVisible(False)
         layout.addWidget(self._large_file_banner)
+
+        self._large_file_box = QWidget()
+        self._large_file_box.setVisible(False)
+        lf = QVBoxLayout(self._large_file_box)
+        lf.setContentsMargins(0, 0, 0, 0)
+        lf.setSpacing(8)
+
+        lf.addWidget(self._section("Sample size  (clustering methods)"))
+        sample_row = QHBoxLayout()
+        self._sample_spin = QSpinBox()
+        self._sample_spin.setRange(1_000, MAX_SAMPLE_SIZE)
+        self._sample_spin.setValue(DEFAULT_SAMPLE_SIZE)
+        self._sample_spin.setSingleStep(5_000)
+        self._sample_spin.setFixedWidth(120)
+        sample_row.addWidget(self._sample_spin)
+        sample_row.addStretch()
+        lf.addLayout(sample_row)
+
+        self._score_full_chk = QCheckBox("Assign clusters to full dataset")
+        self._score_full_chk.setChecked(True)
+        self._score_full_chk.setToolTip(
+            "After fitting on the sample, predict cluster labels for all rows via DuckDB batches."
+        )
+        lf.addWidget(self._score_full_chk)
+
+        layout.addWidget(self._large_file_box)
 
         # Method selector
         layout.addWidget(self._section("Method"))
@@ -449,16 +526,36 @@ class SegmentationPage(QWidget):
     def _on_method_changed(self, idx: int):
         self._kmeans_box.setVisible(idx < 3)
         self._rfm_box.setVisible(idx == 3)
+        if AppState.is_large():
+            is_rfm = idx == 3
+            self._large_file_box.setVisible(not is_rfm)
+            self._large_file_banner.setText(
+                "Large-file mode (DuckDB): RFM computes quartiles and assigns tiers "
+                "across the full dataset in batches."
+                if is_rfm else
+                "Large-file mode (DuckDB): clustering fits on a random sample, then "
+                "optionally assigns labels to the full file in batches."
+            )
 
     def _update_large_file_state(self):
-        blocked = AppState.is_large()
-        self._large_file_banner.setVisible(blocked)
-        self._run_btn.setEnabled(not blocked)
-        if blocked:
-            self._status.setText(
-                "❌  Segmentation unavailable in DuckDB preview mode."
-            )
-        elif self._status.text().startswith("❌  Segmentation unavailable"):
+        is_large = AppState.is_large()
+        self._large_file_banner.setVisible(is_large)
+        if not is_large:
+            self._large_file_box.setVisible(False)
+            if self._status.text().startswith("❌  Segmentation unavailable"):
+                self._status.setText("")
+            return
+
+        total = AppState.get_row_count()
+        max_sample = max(1_000, min(total, MAX_SAMPLE_SIZE))
+        self._sample_spin.setMaximum(max_sample)
+        self._sample_spin.setValue(min(DEFAULT_SAMPLE_SIZE, max_sample))
+
+        is_rfm = self._method_combo.currentIndex() == 3
+        self._large_file_box.setVisible(not is_rfm)
+        self._on_method_changed(self._method_combo.currentIndex())
+        self._run_btn.setEnabled(True)
+        if not self._status.text().startswith("✅"):
             self._status.setText("")
 
     # ------------------------------------------------------------------ #
@@ -469,22 +566,26 @@ class SegmentationPage(QWidget):
         if self._worker and self._worker.isRunning():
             return
 
-        if AppState.is_large():
-            msg = (
-                "This dataset is loaded in DuckDB preview mode (large Parquet). "
-                "Segmentation needs the full dataset in memory.\n\n"
-                "Import a file smaller than 500 MB, or export a subset and re-import."
-            )
-            self._status.setText("❌  Segmentation unavailable in DuckDB preview mode.")
-            QMessageBox.warning(self, "Segmentation Unavailable", msg)
-            return
-
+        is_large = AppState.is_large()
         df = AppState.get_dataframe()
-        if df is None:
+        if df is None and not is_large:
             self._status.setText("❌  No dataset loaded. Please import data first.")
             return
 
         id_col  = self._id_combo.currentText()
+        large_kw = {}
+        if is_large:
+            filepath = AppState.get_filepath()
+            if not filepath:
+                self._status.setText("❌  Large dataset path not available.")
+                return
+            large_kw = {
+                "duckdb_filepath": filepath,
+                "total_rows":      AppState.get_row_count(),
+                "sample_size":     self._sample_spin.value(),
+                "score_full":      self._score_full_chk.isChecked(),
+                "encoding":        AppState.get_load_encoding(),
+            }
 
         if self._method_combo.currentIndex() == 0:
             selected = [self._feature_list.item(i).text()
@@ -499,6 +600,7 @@ class SegmentationPage(QWidget):
                 "id_col":       id_col,
                 "feature_cols": selected,
                 "n_clusters":   self._n_spin.value(),
+                **large_kw,
             }
 
         elif self._method_combo.currentIndex() == 1:
@@ -515,6 +617,7 @@ class SegmentationPage(QWidget):
                 "id_col":       id_col,
                 "feature_cols": selected,
                 "n_clusters":   self._n_spin.value(),
+                **large_kw,
             }
 
         elif self._method_combo.currentIndex() == 2:
@@ -531,6 +634,7 @@ class SegmentationPage(QWidget):
                 "id_col":       id_col,
                 "feature_cols": selected,
                 "n_clusters":   self._n_spin.value(),
+                **large_kw,
             }
 
         else:
@@ -541,6 +645,7 @@ class SegmentationPage(QWidget):
                 "recency_col":   self._rfm_recency.currentText(),
                 "frequency_col": self._rfm_frequency.currentText(),
                 "monetary_col":  self._rfm_monetary.currentText(),
+                **large_kw,
             }
 
         self._run_btn.setEnabled(False)
@@ -567,11 +672,18 @@ class SegmentationPage(QWidget):
 
         self._progress.setValue(100)
         self._progress.setVisible(False)
-        self._run_btn.setEnabled(True)
+        self._update_large_file_state()
 
         n_seg = result.distribution.nunique()
-        self._status.setText(
-            f"✅  Done — {n_seg} segments, {len(result.assignments):,} customers.")
+        status = f"✅  Done — {n_seg} segments, {len(result.assignments):,} rows assigned."
+        if result.is_sampled and result.sample_size:
+            if result.scored_full:
+                status += f"  (model fit on {result.sample_size:,}-row sample)"
+            else:
+                status += f"  (sample only — {result.sample_size:,} rows)"
+        elif result.scored_full and result.total_rows:
+            status += f"  (full dataset — {result.total_rows:,} rows)"
+        self._status.setText(status)
 
         # Summary strip
         method_str = result.method
@@ -616,7 +728,7 @@ class SegmentationPage(QWidget):
 
     def _on_error(self, msg: str):
         self._progress.setVisible(False)
-        self._run_btn.setEnabled(True)
+        self._update_large_file_state()
         self._status.setText(f"❌  {msg}")
         QMessageBox.critical(self, "Segmentation Error", msg)
 

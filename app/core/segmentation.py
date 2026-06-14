@@ -20,8 +20,8 @@ Pure Python/pandas/sklearn — no Qt, no AppState.
 from __future__ import annotations
 
 import pickle
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -30,6 +30,13 @@ from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 from kmodes.kprototypes import KPrototypes
+
+from app.core.duckdb_sample import (
+    DEFAULT_BATCH_SIZE,
+    fetch_quantile_bins,
+    fetch_sample,
+    score_in_batches,
+)
 
 
 CLUSTER_LABEL = "cluster_label"   # shared output column for all clustering methods
@@ -50,6 +57,10 @@ class SegmentationResult:
     distribution:    pd.Series     # count per segment label
     model_bytes:     bytes         # pickle of the fitted model bundle
     inertia:         Optional[float] = None   # K-Means only
+    is_sampled:      bool          = False    # model fit used a DuckDB sample
+    sample_size:     Optional[int] = None     # rows used to fit the model
+    total_rows:      Optional[int] = None     # rows in the source file
+    scored_full:     bool          = False    # assignments cover the full file
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -84,6 +95,135 @@ def _build_profile(df: pd.DataFrame,
                 row[col] = top.iloc[0] if not top.empty else "—"
         rows.append(row)
     return pd.DataFrame(rows).set_index(label_col)
+
+
+def _align_encoded(encoded: pd.DataFrame, enc_cols: list[str]) -> pd.DataFrame:
+    """Align dummy-encoded batch columns to the training feature set."""
+    return encoded.reindex(columns=enc_cols, fill_value=0)
+
+
+def _copy_result(
+    result: SegmentationResult,
+    *,
+    assignments: pd.DataFrame | None = None,
+    profile: pd.DataFrame | None = None,
+    distribution: pd.Series | None = None,
+    is_sampled: bool = False,
+    sample_size: int | None = None,
+    total_rows: int | None = None,
+    scored_full: bool = False,
+) -> SegmentationResult:
+    return SegmentationResult(
+        method=result.method,
+        n_clusters=result.n_clusters,
+        customer_id_col=result.customer_id_col,
+        feature_cols=result.feature_cols,
+        label_col=result.label_col,
+        assignments=assignments if assignments is not None else result.assignments,
+        profile=profile if profile is not None else result.profile,
+        distribution=distribution if distribution is not None else result.distribution,
+        model_bytes=result.model_bytes,
+        inertia=result.inertia,
+        is_sampled=is_sampled,
+        sample_size=sample_size,
+        total_rows=total_rows,
+        scored_full=scored_full,
+    )
+
+
+def _score_kmeans_gmm_batch(batch: pd.DataFrame, bundle: dict) -> pd.DataFrame:
+    customer_id_col = bundle["customer_id_col"]
+    feature_cols = bundle["feature_cols"]
+    enc_cols = bundle["enc_cols"]
+    scaler = bundle["scaler"]
+    model = bundle["model"]
+
+    work = batch[[customer_id_col] + feature_cols].dropna(subset=feature_cols).copy()
+    if work.empty:
+        return work
+
+    encoded, _ = _dummy_encode(work, feature_cols)
+    encoded = _align_encoded(encoded, enc_cols)
+    labels = model.predict(scaler.transform(encoded))
+    work[CLUSTER_LABEL] = labels
+    return work[[customer_id_col] + feature_cols + [CLUSTER_LABEL]]
+
+
+def _score_kprototypes_batch(batch: pd.DataFrame, bundle: dict) -> pd.DataFrame:
+    customer_id_col = bundle["customer_id_col"]
+    feature_cols = bundle["feature_cols"]
+    numeric_cols = bundle["numeric_cols"]
+    categorical_cols = bundle["categorical_cols"]
+    scaler = bundle.get("scaler")
+    model = bundle["model"]
+
+    work = batch[[customer_id_col] + feature_cols].dropna(subset=feature_cols).copy()
+    if work.empty:
+        return work
+
+    if numeric_cols and scaler is not None:
+        scaled = scaler.transform(work[numeric_cols])
+    else:
+        scaled = np.empty((len(work), 0))
+
+    if categorical_cols:
+        cat_data = work[categorical_cols].to_numpy()
+        matrix = np.hstack((scaled, cat_data)).astype(object)
+    else:
+        matrix = scaled
+
+    cat_indices = list(range(len(numeric_cols), len(numeric_cols) + len(categorical_cols)))
+    labels = model.predict(matrix, categorical=cat_indices)
+    work[CLUSTER_LABEL] = labels
+    return work[[customer_id_col] + feature_cols + [CLUSTER_LABEL]]
+
+
+def _finalize_large_clustering(
+    result: SegmentationResult,
+    filepath: str,
+    customer_id_col: str,
+    feature_cols: list[str],
+    total_rows: int,
+    sample_rows: int,
+    score_full: bool,
+    batch_size: int,
+    progress: Callable[[int], None] | None,
+    encoding: str = "utf-8",
+) -> SegmentationResult:
+    bundle = pickle.loads(result.model_bytes)
+    bundle["customer_id_col"] = customer_id_col
+
+    if score_full and total_rows > sample_rows:
+        cols = [customer_id_col] + feature_cols
+        if result.method == "KPrototypes":
+            score_fn = lambda b: _score_kprototypes_batch(b, bundle)
+        else:
+            score_fn = lambda b: _score_kmeans_gmm_batch(b, bundle)
+
+        assignments = score_in_batches(
+            filepath, cols, customer_id_col, total_rows,
+            score_fn, batch_size, progress, encoding,
+        )
+        profile = _build_profile(assignments, feature_cols, CLUSTER_LABEL)
+        distribution = assignments[CLUSTER_LABEL].value_counts().sort_index()
+        return _copy_result(
+            result,
+            assignments=assignments,
+            profile=profile,
+            distribution=distribution,
+            is_sampled=True,
+            sample_size=sample_rows,
+            total_rows=total_rows,
+            scored_full=True,
+        )
+
+    return _copy_result(
+        result,
+        is_sampled=True,
+        sample_size=sample_rows,
+        total_rows=total_rows,
+        scored_full=False,
+    )
 
 
 # ── Engine ────────────────────────────────────────────────────────────────────
@@ -235,7 +375,9 @@ class SegmentationEngine:
             "method":       "KPrototypes",
             "scaler":       scaler,
             "model":        kproto,
-            "feature_cols": feature_cols
+            "feature_cols": feature_cols,
+            "numeric_cols": numeric_cols,
+            "categorical_cols": categorical_cols,
         }
 
         return SegmentationResult(
@@ -392,3 +534,180 @@ class SegmentationEngine:
             )
 
         return prefix + "-Tier-" + tier_series
+
+    # ------------------------------------------------------------------ #
+    #  Large CSV / Parquet (DuckDB) — sample fit + optional full scoring   #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def run_kmeans_large(
+        filepath: str,
+        customer_id_col: str,
+        feature_cols: list[str],
+        n_clusters: int,
+        total_rows: int,
+        sample_size: int,
+        score_full: bool = True,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        random_state: int = 42,
+        progress: Callable[[int], None] | None = None,
+        encoding: str = "utf-8",
+    ) -> SegmentationResult:
+        cols = [customer_id_col] + feature_cols
+        sample_df = fetch_sample(filepath, cols, sample_size, encoding=encoding)
+        if len(sample_df) < n_clusters:
+            raise ValueError(
+                f"Sample returned {len(sample_df)} rows — need at least {n_clusters} "
+                "non-null rows for clustering. Increase sample size or check missing values."
+            )
+        result = SegmentationEngine.run_kmeans(
+            sample_df, customer_id_col, feature_cols, n_clusters, random_state,
+        )
+        if progress:
+            progress(20)
+        return _finalize_large_clustering(
+            result, filepath, customer_id_col, feature_cols,
+            total_rows, len(sample_df), score_full, batch_size, progress, encoding,
+        )
+
+    @staticmethod
+    def run_gmm_large(
+        filepath: str,
+        customer_id_col: str,
+        feature_cols: list[str],
+        n_clusters: int,
+        total_rows: int,
+        sample_size: int,
+        score_full: bool = True,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        random_state: int = 42,
+        progress: Callable[[int], None] | None = None,
+        encoding: str = "utf-8",
+    ) -> SegmentationResult:
+        cols = [customer_id_col] + feature_cols
+        sample_df = fetch_sample(filepath, cols, sample_size, encoding=encoding)
+        if len(sample_df) < n_clusters:
+            raise ValueError(
+                f"Sample returned {len(sample_df)} rows — need at least {n_clusters} "
+                "non-null rows for clustering. Increase sample size or check missing values."
+            )
+        result = SegmentationEngine.run_gmm(
+            sample_df, customer_id_col, feature_cols, n_clusters, random_state,
+        )
+        if progress:
+            progress(20)
+        return _finalize_large_clustering(
+            result, filepath, customer_id_col, feature_cols,
+            total_rows, len(sample_df), score_full, batch_size, progress, encoding,
+        )
+
+    @staticmethod
+    def run_kprototypes_large(
+        filepath: str,
+        customer_id_col: str,
+        feature_cols: list[str],
+        n_clusters: int,
+        total_rows: int,
+        sample_size: int,
+        score_full: bool = True,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        random_state: int = 42,
+        progress: Callable[[int], None] | None = None,
+        encoding: str = "utf-8",
+    ) -> SegmentationResult:
+        cols = [customer_id_col] + feature_cols
+        sample_df = fetch_sample(filepath, cols, sample_size, encoding=encoding)
+        if len(sample_df) < n_clusters:
+            raise ValueError(
+                f"Sample returned {len(sample_df)} rows — need at least {n_clusters} "
+                "non-null rows for clustering. Increase sample size or check missing values."
+            )
+        result = SegmentationEngine.run_kprototypes(
+            sample_df, customer_id_col, feature_cols, n_clusters, random_state,
+        )
+        if progress:
+            progress(20)
+        return _finalize_large_clustering(
+            result, filepath, customer_id_col, feature_cols,
+            total_rows, len(sample_df), score_full, batch_size, progress, encoding,
+        )
+
+    @staticmethod
+    def run_rfm_large(
+        filepath: str,
+        customer_id_col: str,
+        recency_col: str,
+        frequency_col: str,
+        monetary_col: str,
+        total_rows: int,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        progress: Callable[[int], None] | None = None,
+        encoding: str = "utf-8",
+    ) -> SegmentationResult:
+        """
+        RFM on a large CSV / Parquet file: quartiles from the full dataset via DuckDB,
+        tier assignment streamed in batches (no sampling).
+        """
+        feature_cols = [recency_col, frequency_col, monetary_col]
+        cols = [customer_id_col] + feature_cols
+
+        r_bins = fetch_quantile_bins(filepath, recency_col, encoding=encoding)
+        f_bins = fetch_quantile_bins(filepath, frequency_col, encoding=encoding)
+        m_bins = fetch_quantile_bins(filepath, monetary_col, encoding=encoding)
+
+        bundle = {
+            "method":        "rfm",
+            "recency_col":   recency_col,
+            "frequency_col": frequency_col,
+            "monetary_col":  monetary_col,
+            "r_bins":        r_bins,
+            "f_bins":        f_bins,
+            "m_bins":        m_bins,
+        }
+
+        def score_rfm_batch(batch: pd.DataFrame) -> pd.DataFrame:
+            work = batch[cols].dropna(subset=feature_cols).copy()
+            if work.empty:
+                return work
+            if not is_numeric_dtype(work[recency_col]):
+                work[recency_col] = pd.to_datetime(work[recency_col])
+            work["R_tier"] = SegmentationEngine._assign_tiers(
+                work[recency_col], r_bins, prefix="R", invert=True)
+            work["F_tier"] = SegmentationEngine._assign_tiers(
+                work[frequency_col], f_bins, prefix="F", invert=False)
+            work["M_tier"] = SegmentationEngine._assign_tiers(
+                work[monetary_col], m_bins, prefix="M", invert=False)
+            work["rfm_segment"] = (
+                work["R_tier"] + " | " + work["F_tier"] + " | " + work["M_tier"]
+            )
+            tier_cols = ["R_tier", "F_tier", "M_tier"]
+            return work[[customer_id_col] + feature_cols + tier_cols + ["rfm_segment"]]
+
+        assignments = score_in_batches(
+            filepath, cols, customer_id_col, total_rows,
+            score_rfm_batch, batch_size, progress, encoding,
+        )
+        if assignments.empty:
+            raise ValueError("No rows with complete R/F/M values found in the dataset.")
+
+        tier_cols = ["R_tier", "F_tier", "M_tier"]
+        all_feat = feature_cols + tier_cols
+        profile = _build_profile(assignments, all_feat, "rfm_segment")
+        distribution = assignments["rfm_segment"].value_counts().sort_index()
+
+        return SegmentationResult(
+            method="rfm",
+            n_clusters=int(assignments["rfm_segment"].nunique()),
+            customer_id_col=customer_id_col,
+            feature_cols=all_feat,
+            label_col="rfm_segment",
+            assignments=assignments,
+            profile=profile,
+            distribution=distribution,
+            model_bytes=pickle.dumps(bundle),
+            inertia=None,
+            is_sampled=False,
+            sample_size=None,
+            total_rows=total_rows,
+            scored_full=True,
+        )

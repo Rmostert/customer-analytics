@@ -113,7 +113,7 @@ class ImportPage(QWidget):
         subtitle = QLabel(
             "Load your customer dataset. "
             "Supported formats: CSV, Excel, JSON, Parquet. "
-            "Parquet files over 500 MB are queried via DuckDB without loading into memory."
+            "CSV and Parquet files over 500 MB are queried via DuckDB without loading into memory."
         )
         subtitle.setObjectName("page_subtitle")
         subtitle.setWordWrap(True)
@@ -274,9 +274,12 @@ class ImportPage(QWidget):
                 result.col_count,
                 result.column_names,
                 result.column_types,
+                load_encoding=result.load_encoding,
             )
         else:
-            AppState.set_dataframe(result.df, result.filepath)
+            AppState.set_dataframe(
+                result.df, result.filepath, load_encoding=result.load_encoding,
+            )
 
         self._status.setText(
             f"✅  Loaded — {result.row_count:,} rows × {result.col_count} columns"
