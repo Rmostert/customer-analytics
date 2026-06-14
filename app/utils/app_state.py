@@ -37,6 +37,7 @@ class AppState:
         cls._column_names = list(df.columns)
         cls._column_types = {c: str(df[c].dtype) for c in df.columns}
         cls._version     += 1
+        cls._clear_segmentation_result()
 
 
     @classmethod
@@ -62,6 +63,8 @@ class AppState:
         cls._col_count    = col_count
         cls._column_names = column_names
         cls._column_types = column_types
+        cls._version     += 1
+        cls._clear_segmentation_result()
 
     # ------------------------------------------------------------------ #
     #  Getters                                                             #
@@ -128,11 +131,16 @@ class AppState:
         cls._col_count    = 0
         cls._column_names = []
         cls._column_types = {}
+        cls._clear_segmentation_result()
 
     # ------------------------------------------------------------------ #
     #  Segmentation result (used by NBA page in future sprint)            #
     # ------------------------------------------------------------------ #
     _segmentation_result = None
+
+    @classmethod
+    def _clear_segmentation_result(cls):
+        cls._segmentation_result = None
 
     @classmethod
     def set_segmentation_result(cls, result):

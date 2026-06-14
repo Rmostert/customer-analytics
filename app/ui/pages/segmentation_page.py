@@ -167,6 +167,7 @@ class SegmentationPage(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self._refresh_columns()
+        self._update_large_file_state()
 
     # ------------------------------------------------------------------ #
     #  UI construction                                                     #
@@ -210,6 +211,16 @@ class SegmentationPage(QWidget):
         subtitle.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(subtitle)
+
+        self._large_file_banner = QLabel(
+            "Large-file mode (DuckDB): only a 100-row preview is in memory. "
+            "Segmentation requires the full dataset — import a file under 500 MB "
+            "or export a smaller subset first."
+        )
+        self._large_file_banner.setObjectName("status_label")
+        self._large_file_banner.setWordWrap(True)
+        self._large_file_banner.setVisible(False)
+        layout.addWidget(self._large_file_banner)
 
         # Method selector
         layout.addWidget(self._section("Method"))
@@ -439,12 +450,33 @@ class SegmentationPage(QWidget):
         self._kmeans_box.setVisible(idx < 3)
         self._rfm_box.setVisible(idx == 3)
 
+    def _update_large_file_state(self):
+        blocked = AppState.is_large()
+        self._large_file_banner.setVisible(blocked)
+        self._run_btn.setEnabled(not blocked)
+        if blocked:
+            self._status.setText(
+                "❌  Segmentation unavailable in DuckDB preview mode."
+            )
+        elif self._status.text().startswith("❌  Segmentation unavailable"):
+            self._status.setText("")
+
     # ------------------------------------------------------------------ #
     #  Run                                                                 #
     # ------------------------------------------------------------------ #
 
     def _run(self):
         if self._worker and self._worker.isRunning():
+            return
+
+        if AppState.is_large():
+            msg = (
+                "This dataset is loaded in DuckDB preview mode (large Parquet). "
+                "Segmentation needs the full dataset in memory.\n\n"
+                "Import a file smaller than 500 MB, or export a subset and re-import."
+            )
+            self._status.setText("❌  Segmentation unavailable in DuckDB preview mode.")
+            QMessageBox.warning(self, "Segmentation Unavailable", msg)
             return
 
         df = AppState.get_dataframe()
