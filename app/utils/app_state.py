@@ -19,7 +19,7 @@ class AppState:
     _col_count:   int                    = 0
     _column_names: list                  = []
     _column_types: dict                  = {}      # {col_name: dtype_str}
-    _version:      int                    = 0       # increments whenever data changes
+    _version:      int                   = 0       # increments whenever data changes
 
     # ------------------------------------------------------------------ #
     #  Setters                                                             #
@@ -28,7 +28,6 @@ class AppState:
     @classmethod
     def set_dataframe(cls, df: pd.DataFrame, filepath: str = ""):
         """Standard in-memory mode."""
-        cls._close_duckdb()
         cls._dataframe    = df
         cls._filepath     = filepath
         cls._is_large     = False
@@ -39,10 +38,10 @@ class AppState:
         cls._column_types = {c: str(df[c].dtype) for c in df.columns}
         cls._version     += 1
 
+
     @classmethod
     def set_duckdb(cls, con, filepath: str = ""):
         """Large-file DuckDB mode — called by DataLoader, not UI code."""
-        cls._close_duckdb()
         cls._duckdb_con = con
         cls._filepath   = filepath
         cls._is_large   = True
@@ -116,7 +115,11 @@ class AppState:
 
     @classmethod
     def clear(cls):
-        cls._close_duckdb()
+        if cls._duckdb_con is not None:
+            try:
+                cls._duckdb_con.close()
+            except Exception:
+                pass
         cls._dataframe    = None
         cls._filepath     = None
         cls._is_large     = False
@@ -125,12 +128,16 @@ class AppState:
         cls._col_count    = 0
         cls._column_names = []
         cls._column_types = {}
-        cls._version     += 1
+
+    # ------------------------------------------------------------------ #
+    #  Segmentation result (used by NBA page in future sprint)            #
+    # ------------------------------------------------------------------ #
+    _segmentation_result = None
 
     @classmethod
-    def _close_duckdb(cls):
-        if cls._duckdb_con is not None:
-            try:
-                cls._duckdb_con.close()
-            except Exception:
-                pass
+    def set_segmentation_result(cls, result):
+        cls._segmentation_result = result
+
+    @classmethod
+    def get_segmentation_result(cls):
+        return cls._segmentation_result
