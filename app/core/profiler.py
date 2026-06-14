@@ -3,7 +3,7 @@ DataProfiler — generates per-column statistics for the Explore page.
 
 Two code paths:
   • pandas path  — dataset fits in memory (CSV, Excel, JSON, small Parquet)
-  • DuckDB path  — large Parquet file; all aggregations run as SQL queries
+  • DuckDB path  — large CSV / Parquet file; all aggregations run as SQL queries
                    so only the results come back into memory, never the raw data.
 """
 
@@ -95,7 +95,7 @@ class DataProfiler:
     @staticmethod
     def _profile_duckdb(con) -> dict:
         """
-        Profile a large Parquet file through DuckDB's native SUMMARIZE.
+        Profile a large CSV / Parquet file through DuckDB's native SUMMARIZE.
         SUMMARIZE returns one metadata row per source column, so the raw
         dataset never comes back into Python.
         """

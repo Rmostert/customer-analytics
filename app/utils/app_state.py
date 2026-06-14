@@ -19,6 +19,7 @@ class AppState:
     _col_count:   int                    = 0
     _column_names: list                  = []
     _column_types: dict                  = {}      # {col_name: dtype_str}
+    _load_encoding: str                  = "utf-8" # CSV text encoding for DuckDB re-opens
     _version:      int                   = 0       # increments whenever data changes
 
     # ------------------------------------------------------------------ #
@@ -26,12 +27,14 @@ class AppState:
     # ------------------------------------------------------------------ #
 
     @classmethod
-    def set_dataframe(cls, df: pd.DataFrame, filepath: str = ""):
+    def set_dataframe(cls, df: pd.DataFrame, filepath: str = "",
+                      load_encoding: str = "utf-8"):
         """Standard in-memory mode."""
         cls._dataframe    = df
         cls._filepath     = filepath
         cls._is_large     = False
         cls._duckdb_con   = None
+        cls._load_encoding = load_encoding
         cls._row_count    = len(df)
         cls._col_count    = len(df.columns)
         cls._column_names = list(df.columns)
@@ -58,11 +61,14 @@ class AppState:
 
     @classmethod
     def set_meta(cls, row_count: int, col_count: int,
-                 column_names: list, column_types: dict):
+                 column_names: list, column_types: dict,
+                 load_encoding: str | None = None):
         cls._row_count    = row_count
         cls._col_count    = col_count
         cls._column_names = column_names
         cls._column_types = column_types
+        if load_encoding is not None:
+            cls._load_encoding = load_encoding
         cls._version     += 1
         cls._clear_segmentation_result()
 
@@ -108,6 +114,10 @@ class AppState:
     def get_version(cls) -> int:
         return cls._version
 
+    @classmethod
+    def get_load_encoding(cls) -> str:
+        return cls._load_encoding
+
     # ------------------------------------------------------------------ #
     #  Helpers                                                             #
     # ------------------------------------------------------------------ #
@@ -131,6 +141,7 @@ class AppState:
         cls._col_count    = 0
         cls._column_names = []
         cls._column_types = {}
+        cls._load_encoding = "utf-8"
         cls._clear_segmentation_result()
 
     # ------------------------------------------------------------------ #
