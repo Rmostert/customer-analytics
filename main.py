@@ -21,8 +21,9 @@ def main():
     app.setApplicationVersion("1.0.0")
     app.setOrganizationName("Your Company")
 
-    # Load global stylesheet
-    with open("assets/style.qss", "r") as f:
+    # Load global stylesheet (path relative to project root, not cwd)
+    style_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "style.qss")
+    with open(style_path, "r") as f:
         app.setStyleSheet(f.read())
 
     window = MainWindow()

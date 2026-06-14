@@ -32,6 +32,9 @@ from sklearn.preprocessing import StandardScaler
 from kmodes.kprototypes import KPrototypes
 
 
+CLUSTER_LABEL = "cluster_label"   # shared output column for all clustering methods
+
+
 # ── Result container ──────────────────────────────────────────────────────────
 
 @dataclass
@@ -41,7 +44,7 @@ class SegmentationResult:
     n_clusters:      int            # K-Means: user choice; RFM: unique segment count
     customer_id_col: str
     feature_cols:    list[str]      # original columns chosen by user
-    label_col:       str            # "cluster_label" (kmeans) | "rfm_segment" (rfm)
+    label_col:       str            # "cluster_label" | "rfm_segment"
     assignments:     pd.DataFrame  # customer_id + original features + tier cols + label
     profile:         pd.DataFrame  # mean/proportion per segment × feature
     distribution:    pd.Series     # count per segment label
@@ -109,11 +112,11 @@ class SegmentationEngine:
         kmeans  = KMeans(n_clusters=n_clusters, random_state=random_state, n_init="auto")
         labels  = kmeans.fit_predict(X)
 
-        work["cluster_label"] = labels
+        work[CLUSTER_LABEL] = labels
 
-        profile      = _build_profile(work, feature_cols, "cluster_label")
-        distribution = work["cluster_label"].value_counts().sort_index()
-        assignments  = work[[customer_id_col] + feature_cols + ["cluster_label"]].copy()
+        profile      = _build_profile(work, feature_cols, CLUSTER_LABEL)
+        distribution = work[CLUSTER_LABEL].value_counts().sort_index()
+        assignments  = work[[customer_id_col] + feature_cols + [CLUSTER_LABEL]].copy()
 
         bundle = {
             "method":       "kmeans",
@@ -128,7 +131,7 @@ class SegmentationEngine:
             n_clusters=      n_clusters,
             customer_id_col= customer_id_col,
             feature_cols=    feature_cols,
-            label_col=       "cluster_label",
+            label_col=       CLUSTER_LABEL,
             assignments=     assignments,
             profile=         profile,
             distribution=    distribution,
@@ -154,11 +157,11 @@ class SegmentationEngine:
         gmm  = GaussianMixture(n_components=n_clusters, init_params='k-means++', tol=1e-9,random_state=random_state)
         labels  = gmm.fit_predict(X)
 
-        work["cluster_label"] = labels
+        work[CLUSTER_LABEL] = labels
 
-        profile      = _build_profile(work, feature_cols, "cluster_label")
-        distribution = work["cluster_label"].value_counts().sort_index()
-        assignments  = work[[customer_id_col] + feature_cols + ["cluster_label"]].copy()
+        profile      = _build_profile(work, feature_cols, CLUSTER_LABEL)
+        distribution = work[CLUSTER_LABEL].value_counts().sort_index()
+        assignments  = work[[customer_id_col] + feature_cols + [CLUSTER_LABEL]].copy()
 
         bundle = {
             "method":       "GaussianMixture",
@@ -173,7 +176,7 @@ class SegmentationEngine:
             n_clusters=      n_clusters,
             customer_id_col= customer_id_col,
             feature_cols=    feature_cols,
-            label_col=       "gmm_label",
+            label_col=       CLUSTER_LABEL,
             assignments=     assignments,
             profile=         profile,
             distribution=    distribution,
@@ -181,6 +184,7 @@ class SegmentationEngine:
             inertia=         None,
         )
 
+    @staticmethod
     def run_kprototypes(
         df: pd.DataFrame,
         customer_id_col: str,
@@ -199,6 +203,7 @@ class SegmentationEngine:
         categorical_cols = features_df.select_dtypes(exclude='number').columns.tolist()
         
         # 3. Scale numeric data
+        scaler = None
         if numeric_cols:
             scaler = StandardScaler()
             scaled_numeric = scaler.fit_transform(work[numeric_cols])
@@ -219,12 +224,12 @@ class SegmentationEngine:
         # 6. Fit the model
         kproto = KPrototypes(n_clusters=n_clusters, init='Cao', random_state=random_state)
         labels = kproto.fit_predict(data_matrix, categorical=cat_indices)
-    
-        work["cluster_label"] = labels
 
-        profile      = _build_profile(work, feature_cols, "cluster_label")
-        distribution = work["cluster_label"].value_counts().sort_index()
-        assignments  = work[[customer_id_col] + feature_cols + ["cluster_label"]].copy()
+        work[CLUSTER_LABEL] = labels
+
+        profile      = _build_profile(work, feature_cols, CLUSTER_LABEL)
+        distribution = work[CLUSTER_LABEL].value_counts().sort_index()
+        assignments  = work[[customer_id_col] + feature_cols + [CLUSTER_LABEL]].copy()
 
         bundle = {
             "method":       "KPrototypes",
@@ -238,7 +243,7 @@ class SegmentationEngine:
             n_clusters=      n_clusters,
             customer_id_col= customer_id_col,
             feature_cols=    feature_cols,
-            label_col=       "kprototypes_label",
+            label_col=       CLUSTER_LABEL,
             assignments=     assignments,
             profile=         profile,
             distribution=    distribution,
